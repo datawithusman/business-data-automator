@@ -163,6 +163,75 @@ What kills dashboards:
 - Numbers the client cannot tie back to their gut feel (then they stop trusting it)
 - Stale data with no timestamp showing when it last updated
 
+## Step 4b: Dashboard code (Streamlit)
+
+```python
+import streamlit as st
+import pandas as pd
+from sqlalchemy import create_engine
+
+engine = create_engine(st.secrets["DATABASE_URL"])
+
+st.set_page_config(page_title="Ops Dashboard", layout="wide", page_icon="📊")
+
+# Headline KPI
+col1, col2, col3 = st.columns(3)
+with col1:
+    deliveries = pd.read_sql("""
+        SELECT COUNT(*) AS n FROM deliveries
+        WHERE DATE(created_at) = CURRENT_DATE
+    """, engine).iloc[0]["n"]
+    st.metric("Today's Deliveries", deliveries, delta=None)
+
+with col2:
+    late = pd.read_sql("""
+        SELECT COUNT(*) AS n FROM deliveries
+        WHERE DATE(created_at) = CURRENT_DATE AND status = 'late'
+    """, engine).iloc[0]["n"]
+    pct = f"{(late / deliveries * 100):.0f}%" if deliveries else "0%"
+    st.metric("Late Today", f"{late} ({pct})", delta=None)
+
+with col3:
+    avg_time = pd.read_sql("""
+        SELECT AVG(delivery_time_min) AS avg FROM deliveries
+        WHERE DATE(created_at) = CURRENT_DATE
+    """, engine).iloc[0]["avg"]
+    st.metric("Avg Delivery Time", f"{avg_time:.0f} min" if avg_time else "—")
+
+# 7-day trend chart
+st.subheader("Last 7 Days")
+trend = pd.read_sql("""
+    SELECT DATE(created_at) AS day,
+           COUNT(*) AS deliveries,
+           SUM(CASE WHEN status = 'late' THEN 1 ELSE 0 END) AS late
+    FROM deliveries
+    WHERE created_at >= CURRENT_DATE - 7
+    GROUP BY 1 ORDER BY 1
+""", engine)
+
+if not trend.empty:
+    st.bar_chart(trend.set_index("day")[["deliveries", "late"]])
+
+# Drill-down table
+st.subheader("Recent Deliveries")
+recent = pd.read_sql("""
+    SELECT created_at, driver_name, client_name, status, delivery_time_min
+    FROM deliveries
+    ORDER BY created_at DESC
+    LIMIT 100
+""", engine)
+st.dataframe(recent, use_container_width=True)
+
+# Timestamp so owner knows data is fresh
+st.caption(f"Last updated: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}")
+```
+
+Run it:
+
+```bash
+streamlit run dashboard.py --server.port 8501
+```
+
 ## Step 5: Automation recipes
 
 These are the automations that actually get used in small businesses. Pick one based on what the client complains about most.
@@ -247,6 +316,185 @@ def sync_excel_to_db():
     df.to_sql('deliveries', engine, if_exists='append', index=False)
     log.info(f"Synced {len(df)} rows")
 ```
+
+### Google Sheets sync (live)
+
+Most clients already use Google Sheets. Connect once, sync automatically.
+
+```python
+import gspread
+import pandas as pd
+from sqlalchemy import create_engine
+
+def sync_google_sheet(sheet_url: str, worksheet: str, table_name: str):
+    gc = gspread.service_account(filename="service-account.json")
+    sheet = gc.open_by_url(sheet_url)
+    ws = sheet.worksheet(worksheet)
+    rows = ws.get_all_records()
+    df = pd.DataFrame(rows)
+    df = clean_dates(df, 'date')
+    df = standardize_categories(df, 'status', STATUS_MAPPING)
+    df = clean_currency(df, 'amount')
+
+    engine = create_engine(DATABASE_URL)
+    with engine.begin() as conn:
+        conn.execute(f"DELETE FROM {table_name} WHERE DATE(created_at) = CURRENT_DATE")
+        df.to_sql(table_name, conn, if_exists='append', index=False)
+    log.info(f"Synced {len(df)} rows from Google Sheets")
+```
+
+Setup: Create a Google Service Account, share the sheet with the service account email, download the JSON key.
+
+### Slack alert
+
+For ops teams already on Slack, send alerts there instead of email or WhatsApp.
+
+```python
+import requests
+
+def send_slack_alert(webhook_url: str, message: str):
+    """Send a message to Slack via incoming webhook."""
+    requests.post(webhook_url, json={"text": message})
+
+def check_and_alert_late():
+    late = pd.read_sql("""
+        SELECT driver_name, client_name, scheduled_time
+        FROM deliveries
+        WHERE status = 'in_progress'
+          AND NOW() - scheduled_time > INTERVAL '30 minutes'
+    """, engine)
+
+    for _, row in late.iterrows():
+        send_slack_alert(
+            webhook_url=SLACK_WEBHOOK,
+            message=f"🚨 {row.driver_name} is 30+ min late for {row.client_name}",
+        )
+
+def daily_kpi_to_slack():
+    stats = pd.read_sql("""
+        SELECT COUNT(*) AS deliveries,
+               SUM(CASE WHEN status = 'late' THEN 1 ELSE 0 END) AS late
+        FROM deliveries WHERE DATE(created_at) = CURRENT_DATE - 1
+    """, engine).iloc[0]
+
+    send_slack_alert(
+        webhook_url=SLACK_WEBHOOK,
+        message=f"📊 Yesterday: {stats.deliveries} deliveries, {stats.late} late",
+    )
+```
+
+## Step 6: Deployment with Docker Compose
+
+One file, one command to run the full stack on any VPS.
+
+```yaml
+# docker-compose.yml
+version: "3.9"
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ops
+      POSTGRES_USER: ops
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports: ["5432:5432"]
+    restart: always
+
+  dashboard:
+    build: .
+    command: streamlit run dashboard.py --server.port 8501 --server.address 0.0.0.0
+    ports: ["8501:8501"]
+    environment:
+      DATABASE_URL: postgresql://ops:${DB_PASSWORD}@db:5432/ops
+    depends_on: [db]
+    restart: always
+
+  sync:
+    build: .
+    command: python sync_job.py
+    environment:
+      DATABASE_URL: postgresql://ops:${DB_PASSWORD}@db:5432/ops
+    depends_on: [db]
+    restart: always
+
+  metabase:
+    image: metabase/metabase:latest
+    ports: ["3000:3000"]
+    environment:
+      MB_DB_TYPE: postgres
+      MB_DB_DBNAME: metabase
+      MB_DB_PORT: 5432
+      MB_DB_USER: ops
+      MB_DB_PASS: ${DB_PASSWORD}
+      MB_DB_HOST: db
+    depends_on: [db]
+    restart: always
+
+volumes:
+  pgdata:
+```
+
+```dockerfile
+# Dockerfile
+FROM python:3.11-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+```
+
+Deploy:
+
+```bash
+docker compose up -d
+```
+
+Dashboard at `http://YOUR-VPS:8501`, Metabase at `http://YOUR-VPS:3000`.
+
+Cost: $10/month VPS from Hetzner, DigitalOcean, or Contabo handles all of this for a small business.
+
+## Step 7: Testing
+
+Test data cleaning functions so re-runs do not silently break.
+
+```python
+# tests/test_cleaning.py
+import pandas as pd
+import pytest
+
+def test_clean_dates_mixed_formats():
+    df = pd.DataFrame({"date": ["2026-03-15", "15/03/2026", "March 15, 2026"]})
+    result = clean_dates(df, "date")
+    assert result.notna().all(), "All dates should parse"
+    assert result.dt.day.unique().tolist() == [15]
+
+def test_clean_currency():
+    df = pd.DataFrame({"amount": ["SAR 1,200", "1200 riyal", "850"]})
+    result = clean_currency(df, "amount")
+    assert result.tolist() == [1200.0, 1200.0, 850.0]
+
+def test_standardize_categories():
+    df = pd.DataFrame({"status": ["Delivered", "delivrd", "DELIVERED", "late"]})
+    mapping = {"delivered": "Delivered", "delivrd": "Delivered"}
+    result = standardize_categories(df, "status", mapping)
+    assert result.tolist().count("Delivered") == 3
+```
+
+Run: `pytest tests/ --cov`
+
+## Step 8: Troubleshooting
+
+| Problem | Likely cause | Fix |
+|---|---|---|
+| Dashboard shows no data | Sync job failed or DB connection wrong | Check `docker compose logs sync` |
+| Dates showing as 1970 | Mixed date format, parser fell back to epoch | Add explicit format to `pd.to_datetime` |
+| Currency column is NaN | Regex stripping too aggressive | Test regex on actual values before deploying |
+| Client says "numbers are wrong" | Source Excel has new columns or renamed sheets | Re-profile the file, update the sync script |
+| Streamlit crashes on load | Large query blocking the main thread | Add `@st.cache_data` to expensive queries |
+| Google Sheets sync fails | Service account lost access or sheet renamed | Re-share the sheet, check service account email |
+| Postgres connection refused | DB not ready before app starts | Add healthcheck in docker-compose |
 
 ## Common client types and what they actually need
 
