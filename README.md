@@ -4,9 +4,11 @@ A Claude Code skill for developers who turn messy client spreadsheets into real 
 
 Built for freelancers, consultants, and small agencies working with non-tech business owners. The kind of client who runs their entire operation on Excel and calls you when things break.
 
-![Skill type](https://img.shields.io/badge/type-Claude%20Code%20Skill-6C63FF)
-![License](https://img.shields.io/badge/license-MIT-green)
-![Version](https://img.shields.io/badge/version-1.0.0-blue)
+[![Version](https://img.shields.io/github/v/release/datawithusman/business-data-automator?color=blue&label=version)](https://github.com/datawithusman/business-data-automator/releases)
+[![License: MIT](https://img.shields.io/github/license/datawithusman/business-data-automator?color=green)](LICENSE)
+[![Stars](https://img.shields.io/github/stars/datawithusman/business-data-automator?style=social)](https://github.com/datawithusman/business-data-automator/stargazers)
+[![Skill Type](https://img.shields.io/badge/type-Claude%20Code%20Skill-6C63FF)](#install)
+[![Last Updated](https://img.shields.io/github/last-commit/datawithusman/business-data-automator?label=last%20update)](https://github.com/datawithusman/business-data-automator/commits/main)
 
 ## What this skill does
 

@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  markdown-quality:
+    name: Markdown Quality Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Lint Markdown
+        run: |
+          npm install -g markdownlint-cli@0.41.0
+          markdownlint \
+            --disable MD013 MD024 MD033 MD034 MD041 \
+            README.md SKILL.md CONTRIBUTING.md \
+            || echo "Markdown linting warnings (non-blocking)"
+
+      - name: Check Links
+        uses: lycheeverse/lychee-action@v1.10.0
+        with:
+          args: --verbose --no-progress --max-concurrency 1 README.md SKILL.md
+          fail: false
+        continue-on-error: true
+
+  yaml-frontmatter:
+    name: Validate YAML Frontmatter
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Validate SKILL.md frontmatter
+        run: |
+          python -c "
+          import sys, yaml
+          with open('SKILL.md', 'r', encoding='utf-8') as f:
+              content = f.read()
+          if not content.startswith('---'):
+              print('Warning: No YAML frontmatter found in SKILL.md')
+              sys.exit(0)
+          parts = content.split('---', 2)
+          if len(parts) < 3:
+              print('Error: Malformed YAML frontmatter')
+              sys.exit(1)
+          try:
+              meta = yaml.safe_load(parts[1])
+              print(f'Frontmatter parsed: {meta}')
+              required = ['name', 'description', 'version']
+              for key in required:
+                  if key not in meta:
+                      print(f'Missing recommended key: {key}')
+              print('YAML frontmatter valid')
+          except yaml.YAMLError as e:
+              print(f'YAML parse error: {e}')
+              sys.exit(1)
+          "
